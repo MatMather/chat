@@ -1,0 +1,1620 @@
+<!DOCTYPE html>
+<html lang="pt-BR">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>PhotoGram</title>
+    
+    <!-- Tailwind CSS -->
+    <script src="https://cdn.tailwindcss.com"></script>
+    
+    <!-- React & ReactDOM -->
+    <script crossorigin src="https://unpkg.com/react@18/umd/react.development.js"></script>
+    <script crossorigin src="https://unpkg.com/react-dom@18/umd/react-dom.development.js"></script>
+    
+    <!-- Babel -->
+    <script src="https://unpkg.com/@babel/standalone/babel.min.js"></script>
+    
+    <!-- FontAwesome -->
+    <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.4.0/css/all.min.css">
+
+    <!-- Firebase -->
+    <script src="https://www.gstatic.com/firebasejs/10.7.1/firebase-app-compat.js"></script>
+    <script src="https://www.gstatic.com/firebasejs/10.7.1/firebase-auth-compat.js"></script>
+    <script src="https://www.gstatic.com/firebasejs/10.7.1/firebase-firestore-compat.js"></script>
+
+    <style>
+        body {
+            background-color: #f0f2f5;
+            font-family: 'Segoe UI', Helvetica, Arial, sans-serif;
+        }
+        .photogram-blue { color: #1877F2; }
+        .bg-photogram-blue { background-color: #1877F2; }
+        .hover-bg-photogram-dark:hover { background-color: #166fe5; }
+        .glass-header {
+            background: rgba(255, 255, 255, 0.95);
+            backdrop-filter: blur(10px);
+            border-bottom: 1px solid #ddd;
+        }
+        .fade-in { animation: fadeIn 0.3s ease-in; }
+        @keyframes fadeIn { from { opacity: 0; } to { opacity: 1; } }
+        
+        /* Modal Overlay */
+        .modal-overlay {
+            background-color: rgba(0,0,0,0.5);
+            position: fixed; top: 0; left: 0; right: 0; bottom: 0;
+            display: flex; align-items: center; justify-content: center; z-index: 50;
+        }
+    </style>
+</head>
+<body>
+    <div id="root"></div>
+
+    <script type="text/babel">
+        // --- Configuração ---
+        const firebaseConfig = JSON.parse(__firebase_config || '{}');
+        const app = firebase.initializeApp(firebaseConfig);
+        const auth = firebase.auth();
+        const db = firebase.firestore();
+        const appId = __app_id || 'photogram-v2';
+        const initialAuthToken = typeof __initial_auth_token !== 'undefined' ? __initial_auth_token : null;
+        
+        // Ativar logs de debug para o Firestore
+        firebase.firestore.setLogLevel('debug');
+
+
+        const COLLECTIONS = {
+            USERS: `artifacts/${appId}/public/data/users`,
+            POSTS: `artifacts/${appId}/public/data/posts`,
+            MESSAGES: `artifacts/${appId}/public/data/messages`, // Mensagens privadas (1:1)
+            GROUPS: `artifacts/${appId}/public/data/groups`, // Metadados dos grupos
+            REPORTS: `artifacts/${appId}/public/data/reports`, // Denúncias (Público)
+            CLASSROOMS: `artifacts/${appId}/public/data/classrooms`,
+            REMINDERS: (userId) => `artifacts/${appId}/users/${userId}/reminders`, // Lembretes (Privado)
+        };
+
+        const { useState, useEffect, useRef } = React;
+
+        // --- Utilitários ---
+        const containsLink = (text) => {
+            const urlRegex = /(https?:\/\/[^\s]+)|(www\.[^\s]+)|(\.[a-z]{2,}\/)/i;
+            return urlRegex.test(text);
+        };
+
+        const translateText = (text) => {
+            // Mock de tradução simples (simulação)
+            return `[Traduzido]: ${text}`;
+        };
+
+        const formatTime = (timestamp) => {
+            if (!timestamp) return '...';
+            const date = timestamp.toDate ? timestamp.toDate() : new Date(timestamp);
+            return date.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
+        };
+        
+        const formatDateTime = (timestamp) => {
+            if (!timestamp) return '...';
+            const date = timestamp.toDate ? timestamp.toDate() : new Date(timestamp);
+            return date.toLocaleString();
+        };
+        
+        // Encontra o usuário pelo UID (necessário para buscar o nome do remetente em grupos, etc.)
+        const findUser = (uid, usersArray) => usersArray.find(u => u.uid === uid);
+
+
+        // --- Componente: Aviso de Privacidade ---
+        function PrivacyWarning({ onClose }) {
+            return (
+                <div className="modal-overlay">
+                    <div className="bg-white p-6 rounded-lg shadow-xl max-w-md text-center">
+                        <i className="fas fa-shield-alt text-4xl text-yellow-500 mb-4"></i>
+                        <h2 className="text-xl font-bold mb-2">Atenção à Privacidade</h2>
+                        <p className="text-gray-600 mb-6">
+                            Bem-vindo ao PhotoGram! Por favor, tenha cuidado ao compartilhar informações pessoais. 
+                            Proteja seus dados e interaja com respeito.
+                        </p>
+                        <button onClick={onClose} className="bg-photogram-blue text-white px-6 py-2 rounded-lg font-bold">
+                            Entendi
+                        </button>
+                    </div>
+                </div>
+            );
+        }
+        
+        // --- Componente: Denúncia de Usuário (Modal) ---
+        function ReportUserModal({ targetUser, currentUser, onClose }) {
+            const [reason, setReason] = useState('');
+            const [submitting, setSubmitting] = useState(false);
+            const [success, setSuccess] = useState(false);
+
+            const handleSubmit = async () => {
+                if (!reason.trim()) return;
+                setSubmitting(true);
+                
+                try {
+                    await db.collection(COLLECTIONS.REPORTS).add({
+                        reporterId: currentUser.uid,
+                        reporterUsername: currentUser.username,
+                        targetId: targetUser.uid,
+                        targetUsername: targetUser.username,
+                        reason: reason,
+                        timestamp: firebase.firestore.FieldValue.serverTimestamp()
+                    });
+                    setSuccess(true);
+                    setTimeout(onClose, 2000);
+                } catch(e) {
+                    console.error("Erro ao enviar denúncia:", e);
+                    setSubmitting(false);
+                }
+            };
+
+            return (
+                <div className="modal-overlay" onClick={onClose}>
+                    <div className="bg-white p-6 rounded-lg w-96" onClick={e => e.stopPropagation()}>
+                        <h3 className="text-xl font-bold mb-4">Denunciar @{targetUser.username}</h3>
+                        {success ? (
+                            <div className="text-center p-4 bg-green-100 text-green-700 rounded">
+                                <i className="fas fa-check-circle mr-2"></i> Denúncia enviada com sucesso.
+                            </div>
+                        ) : (
+                            <>
+                                <textarea 
+                                    className="w-full border p-2 rounded mb-4"
+                                    placeholder="Motivo da denúncia (com detalhes)..."
+                                    value={reason}
+                                    onChange={e => setReason(e.target.value)}
+                                    rows="4"
+                                    maxLength={300}
+                                />
+                                <button 
+                                    onClick={handleSubmit}
+                                    disabled={submitting || !reason.trim()}
+                                    className={`w-full text-white py-2 rounded font-bold transition ${submitting || !reason.trim() ? 'bg-gray-400' : 'bg-red-600 hover:bg-red-700'}`}
+                                >
+                                    {submitting ? 'Enviando...' : 'Enviar Denúncia'}
+                                </button>
+                                <button onClick={onClose} className="w-full mt-2 text-sm text-gray-500 hover:text-gray-700">Cancelar</button>
+                            </>
+                        )}
+                    </div>
+                </div>
+            );
+        }
+
+        // --- Componente: Login Customizado (Username/Senha) ---
+        function LoginScreen({ onLogin }) {
+            // Verifica se o usuário Auth já está presente (via token/anônimo) mas falta o perfil Firestore.
+            const isAuthUserPresent = !!auth.currentUser;
+            
+            // Se o usuário Auth está presente, inicia no modo de Registro para criar o perfil.
+            const [isRegistering, setIsRegistering] = useState(isAuthUserPresent);
+            
+            const [username, setUsername] = useState('');
+            const [password, setPassword] = useState('');
+            const [loading, setLoading] = useState(false);
+            const [error, setError] = useState('');
+
+            const handleAuth = async (e) => {
+                e.preventDefault();
+                setError('');
+                
+                if (username.length < 3 || password.length < 3) {
+                    setError("Usuário e senha devem ter no mínimo 3 caracteres.");
+                    return;
+                }
+
+                if (isRegistering && username === password) {
+                    setError("A senha não pode ser igual ao nome de usuário.");
+                    return;
+                }
+
+                setLoading(true);
+
+                try {
+                    // 1. O UID do usuário autenticado (via custom token)
+                    const uid = auth.currentUser?.uid;
+                    if (!uid) {
+                         throw new Error("Falha ao obter ID de usuário (UID). Autenticação de ambiente ausente.");
+                    }
+
+                    // 2. Verificar se usuário existe para login ou registro
+                    const userRef = db.collection(COLLECTIONS.USERS);
+                    const snapshot = await userRef
+                        .where('username', '==', username).get();
+                    
+                    if (isRegistering) {
+                        // --- Lógica de Registro (Create Account) ---
+                        if (!snapshot.empty) {
+                            throw new Error("Este nome de usuário já existe. Tente outro nome.");
+                        }
+
+                        // 3. Salvar dados do novo usuário no Firestore (usando o UID do ambiente)
+                        const userData = {
+                            uid,
+                            username,
+                            password, // Armazenamento simples de senha para simulação de login
+                            displayName: username,
+                            photoURL: `https://api.dicebear.com/7.x/avataaars/svg?seed=${username}`,
+                            bio: "Olá! Estou usando o PhotoGram.",
+                            friends: [],
+                            friendRequests: [],
+                            groups: [], // Novo: Lista de IDs de grupo
+                            isGuest: false,
+                            createdAt: firebase.firestore.FieldValue.serverTimestamp()
+                        };
+
+                        await db.doc(`${COLLECTIONS.USERS}/${uid}`).set(userData);
+                        
+                        // 4. Login bem-sucedido (o App fará o resto via onAuthStateChanged)
+                        onLogin(userData);
+
+                    } else {
+                        // --- Lógica de Login ---
+                        if (snapshot.empty) {
+                            throw new Error("Usuário não encontrado. Se for o primeiro acesso, mude para 'Criar Conta'.");
+                        }
+                        const userDoc = snapshot.docs[0].data();
+                        if (userDoc.password !== password) {
+                            throw new Error("Senha incorreta.");
+                        }
+                        
+                        if(userDoc.uid !== uid) {
+                            console.warn("UID de Auth e UID de Perfil não correspondem, usando o perfil encontrado.");
+                        }
+
+                        onLogin(userDoc);
+                    }
+                } catch (err) {
+                    console.error("Erro durante autenticação/registro:", err);
+                    setError(err.message || "Ocorreu um erro desconhecido ao tentar entrar. Verifique a consola.");
+                } finally {
+                    setLoading(false);
+                }
+            };
+
+            const handleGuest = () => {
+                const guestId = 'guest_' + Date.now();
+                onLogin({
+                    uid: guestId,
+                    displayName: 'Visitante',
+                    username: 'Visitante',
+                    photoURL: 'https://api.dicebear.com/7.x/avataaars/svg?seed=guest',
+                    isGuest: true,
+                    friends: [],
+                    friendRequests: [],
+                    groups: [],
+                    bio: "Visitante temporário"
+                });
+            };
+
+            return (
+                <div className="min-h-screen flex flex-col items-center justify-center bg-gray-100 p-4">
+                    <div className="mb-8 text-center">
+                        <i className="fas fa-camera text-6xl photogram-blue mb-4"></i>
+                        <h1 className="text-4xl font-bold photogram-blue">PhotoGram</h1>
+                    </div>
+                    
+                    <div className="bg-white p-8 rounded-xl shadow-lg w-full max-w-md">
+                        <form onSubmit={handleAuth} className="space-y-4">
+                            <h2 className="text-xl font-bold text-center text-gray-700">
+                                {isRegistering ? 'Criar Conta' : 'Entrar'}
+                            </h2>
+                            <input
+                                type="text"
+                                placeholder="Nome de Usuário"
+                                className="w-full p-3 border rounded bg-gray-50"
+                                value={username}
+                                onChange={e => setUsername(e.target.value.replace(/\s/g, '').toLowerCase())} // Remove espaços
+                                disabled={loading}
+                            />
+                            <input
+                                type="password"
+                                placeholder="Senha"
+                                className="w-full p-3 border rounded bg-gray-50"
+                                value={password}
+                                onChange={e => setPassword(e.target.value)}
+                                disabled={loading}
+                            />
+                            {error && <p className="text-red-500 text-sm p-2 bg-red-100 border border-red-300 rounded">{error}</p>}
+                            
+                            <button disabled={loading} className="w-full bg-photogram-blue text-white py-3 rounded font-bold hover:brightness-90 transition duration-150">
+                                {loading ? 'Processando...' : (isRegistering ? 'Cadastrar' : 'Entrar')}
+                            </button>
+                        </form>
+                        
+                        <div className="mt-4 text-center space-y-2">
+                            <p className="text-sm cursor-pointer text-blue-600 hover:underline" onClick={() => setIsRegistering(!isRegistering)}>
+                                {isRegistering ? 'Já tem conta? Entre aqui.' : 'Não tem conta? Cadastre-se.'}
+                            </p>
+                            <hr className="my-3"/>
+                            <button onClick={handleGuest} className="text-sm text-gray-500 hover:text-gray-700">
+                                Entrar como Visitante (Dados não salvos)
+                            </button>
+                        </div>
+                    </div>
+                </div>
+            );
+        }
+
+        // --- Componente: Sala de Aula (Omitido para foco, mantém a função original) ---
+        function Classroom({ user, onExit }) {
+            const [isTeacher, setIsTeacher] = useState(false);
+            const [roomCode, setRoomCode] = useState('');
+            const [activeRoom, setActiveRoom] = useState(null);
+            const [question, setQuestion] = useState('');
+            const [answer, setAnswer] = useState('');
+            const [messages, setMessages] = useState([]);
+            const [chatUnlocked, setChatUnlocked] = useState(false);
+            const [newMessage, setNewMessage] = useState('');
+
+            // Entrar/Criar Sala
+            const handleEnterRoom = async () => {
+                if(!roomCode) return;
+                const roomRef = db.doc(`${COLLECTIONS.CLASSROOMS}/${roomCode}`);
+                const doc = await roomRef.get();
+
+                if (doc.exists) {
+                    setActiveRoom({ id: doc.id, ...doc.data() });
+                    setIsTeacher(doc.data().teacherId === user.uid);
+                    // Se for professor ou já respondeu, libera chat
+                    if (doc.data().teacherId === user.uid || (doc.data().answers && doc.data().answers[user.uid])) {
+                        setChatUnlocked(true);
+                    }
+                } else {
+                    // Criar sala nova se não existir
+                    const newRoom = {
+                        teacherId: user.uid,
+                        createdAt: firebase.firestore.FieldValue.serverTimestamp(),
+                        question: '',
+                        answers: {}
+                    };
+                    await roomRef.set(newRoom);
+                    setActiveRoom({ id: roomCode, ...newRoom });
+                    setIsTeacher(true);
+                    setChatUnlocked(true);
+                }
+            };
+
+            // Monitorar Mensagens da Sala
+            useEffect(() => {
+                if (!activeRoom) return;
+                const unsub = db.collection(COLLECTIONS.CLASSROOMS).doc(activeRoom.id).collection('messages')
+                    .orderBy('timestamp', 'asc')
+                    .onSnapshot(snap => {
+                        setMessages(snap.docs.map(d => d.data()));
+                    });
+                
+                // Monitorar pergunta da sala
+                const roomUnsub = db.doc(`${COLLECTIONS.CLASSROOMS}/${activeRoom.id}`).onSnapshot(doc => {
+                    if(doc.exists) setActiveRoom({id: doc.id, ...doc.data()});
+                });
+
+                return () => { unsub(); roomUnsub(); };
+            }, [activeRoom?.id]);
+
+            const updateQuestion = async () => {
+                await db.doc(`${COLLECTIONS.CLASSROOMS}/${activeRoom.id}`).update({ question });
+                console.log('Questão enviada!');
+            };
+
+            const submitAnswer = async () => {
+                if(!answer.trim()) return;
+                await db.doc(`${COLLECTIONS.CLASSROOMS}/${activeRoom.id}`).set({
+                    answers: { [user.uid]: answer }
+                }, { merge: true });
+                setChatUnlocked(true);
+            };
+
+            const sendClassMessage = async (e) => {
+                e.preventDefault();
+                if(!newMessage.trim()) return;
+                if(containsLink(newMessage)) {
+                    console.log("Links não são permitidos.");
+                    return;
+                }
+                await db.collection(COLLECTIONS.CLASSROOMS).doc(activeRoom.id).collection('messages').add({
+                    text: newMessage,
+                    senderName: user.displayName,
+                    timestamp: firebase.firestore.FieldValue.serverTimestamp()
+                });
+                setNewMessage('');
+            };
+
+            if (!activeRoom) {
+                return (
+                    <div className="p-8 max-w-md mx-auto bg-white rounded shadow text-center">
+                        <h2 className="text-2xl font-bold mb-4">Sala de Aula</h2>
+                        <input 
+                            type="text" placeholder="Código da Sala" 
+                            className="border p-2 rounded w-full mb-4"
+                            value={roomCode} onChange={e => setRoomCode(e.target.value)}
+                        />
+                        <div className="flex gap-2">
+                            <button onClick={onExit} className="flex-1 bg-gray-300 py-2 rounded">Voltar</button>
+                            <button onClick={handleEnterRoom} className="flex-1 bg-green-600 text-white py-2 rounded">Entrar / Criar</button>
+                        </div>
+                        <p className="text-xs text-gray-500 mt-2">Digite um código novo para criar uma sala como Professor.</p>
+                    </div>
+                );
+            }
+
+            return (
+                <div className="h-[calc(100vh-80px)] flex flex-col bg-white rounded shadow mx-auto max-w-4xl mt-4">
+                    <div className="bg-green-600 text-white p-4 flex justify-between items-center rounded-t">
+                        <h2 className="font-bold">Sala: {activeRoom.id} ({isTeacher ? 'Professor' : 'Aluno'})</h2>
+                        <button onClick={onExit} className="text-sm bg-green-800 px-3 py-1 rounded">Sair</button>
+                    </div>
+                    
+                    <div className="p-4 bg-gray-50 border-b">
+                        {isTeacher ? (
+                            <div className="flex gap-2">
+                                <input 
+                                    className="flex-1 border p-2 rounded" 
+                                    placeholder="Defina a questão para a turma..."
+                                    value={question} onChange={e => setQuestion(e.target.value)}
+                                />
+                                <button onClick={updateQuestion} className="bg-blue-500 text-white px-4 rounded">Definir</button>
+                            </div>
+                        ) : (
+                            <div>
+                                <p className="font-bold text-lg mb-2">Questão do Professor: {activeRoom.question || "Aguardando questão..."}</p>
+                                {!chatUnlocked && (
+                                    <div className="flex gap-2">
+                                        <input 
+                                            className="flex-1 border p-2 rounded" 
+                                            placeholder="Sua resposta..."
+                                            value={answer} onChange={e => setAnswer(e.target.value)}
+                                        />
+                                        <button onClick={submitAnswer} className="bg-green-500 text-white px-4 rounded">Responder para liberar Chat</button>
+                                    </div>
+                                )}
+                            </div>
+                        )}
+                    </div>
+
+                    <div className="flex-1 overflow-y-auto p-4 space-y-2">
+                        {!chatUnlocked && !isTeacher && (
+                            <div className="text-center text-gray-500 mt-10">
+                                <i className="fas fa-lock text-3xl mb-2"></i>
+                                <p>Responda a questão para conversar.</p>
+                            </div>
+                        )}
+                        {(chatUnlocked || isTeacher) && messages.map((m, i) => (
+                            <div key={i} className="bg-gray-200 p-2 rounded w-fit">
+                                <span className="font-bold text-xs block">{m.senderName}</span>
+                                {m.text}
+                            </div>
+                        ))}
+                    </div>
+
+                    {(chatUnlocked || isTeacher) && (
+                        <form onSubmit={sendClassMessage} className="p-4 border-t flex gap-2">
+                            <input 
+                                className="flex-1 border p-2 rounded" 
+                                value={newMessage} onChange={e => setNewMessage(e.target.value)}
+                                placeholder="Mensagem para a turma..."
+                            />
+                            <button className="bg-green-600 text-white px-4 rounded"><i className="fas fa-paper-plane"></i></button>
+                        </form>
+                    )}
+                </div>
+            );
+        }
+
+        // --- Componente: Modal de Gerenciamento de Grupo ---
+        function ManageGroupModal({ group, currentUser, users, onClose }) {
+            const [search, setSearch] = useState('');
+            const [feedback, setFeedback] = useState({ message: '', type: '' });
+
+            const filteredUsers = users.filter(u => 
+                u.username.toLowerCase().includes(search.toLowerCase()) && 
+                u.uid !== currentUser.uid &&
+                !group.members.includes(u.uid) // Não mostrar membros atuais
+            );
+
+            const addMember = async (targetUser) => {
+                if (group.ownerId !== currentUser.uid) {
+                    setFeedback({ message: "Apenas o criador do grupo pode adicionar membros.", type: 'error' });
+                    return;
+                }
+
+                try {
+                    const batch = db.batch();
+                    
+                    // 1. Adicionar membro ao grupo
+                    const groupRef = db.doc(`${COLLECTIONS.GROUPS}/${group.id}`);
+                    batch.update(groupRef, {
+                        members: firebase.firestore.FieldValue.arrayUnion(targetUser.uid)
+                    });
+
+                    // 2. Adicionar o grupo ao perfil do novo membro
+                    const userRef = db.doc(`${COLLECTIONS.USERS}/${targetUser.uid}`);
+                    batch.update(userRef, {
+                        groups: firebase.firestore.FieldValue.arrayUnion(group.id)
+                    });
+
+                    await batch.commit();
+                    setFeedback({ message: `@${targetUser.username} adicionado com sucesso!`, type: 'success' });
+                    setSearch('');
+                    
+                } catch (e) {
+                    console.error("Erro ao adicionar membro:", e);
+                    setFeedback({ message: "Erro ao adicionar membro. Tente novamente.", type: 'error' });
+                }
+            };
+
+            const removeMember = async (targetUid, targetUsername) => {
+                if (group.ownerId !== currentUser.uid) {
+                    setFeedback({ message: "Apenas o criador do grupo pode remover membros.", type: 'error' });
+                    return;
+                }
+                if (targetUid === currentUser.uid) {
+                    setFeedback({ message: "Você não pode se remover desta tela. Use a opção 'Sair do Grupo'.", type: 'error' });
+                    return;
+                }
+
+                try {
+                    const batch = db.batch();
+                    
+                    // 1. Remover membro do grupo
+                    const groupRef = db.doc(`${COLLECTIONS.GROUPS}/${group.id}`);
+                    batch.update(groupRef, {
+                        members: firebase.firestore.FieldValue.arrayRemove(targetUid)
+                    });
+
+                    // 2. Remover o grupo do perfil do membro
+                    const userRef = db.doc(`${COLLECTIONS.USERS}/${targetUid}`);
+                    batch.update(userRef, {
+                        groups: firebase.firestore.FieldValue.arrayRemove(group.id)
+                    });
+
+                    await batch.commit();
+                    setFeedback({ message: `@${targetUsername} removido.`, type: 'success' });
+
+                } catch (e) {
+                    console.error("Erro ao remover membro:", e);
+                    setFeedback({ message: "Erro ao remover membro. Tente novamente.", type: 'error' });
+                }
+            };
+
+
+            return (
+                <div className="modal-overlay" onClick={onClose}>
+                    <div className="bg-white p-6 rounded-lg w-full max-w-xl" onClick={e => e.stopPropagation()}>
+                        <h3 className="text-xl font-bold mb-4 flex justify-between items-center">
+                            Gerenciar Membros do Grupo: {group.name}
+                            <span className="text-sm font-normal text-gray-500">Dono: {findUser(group.ownerId, users)?.username || 'Eu'}</span>
+                        </h3>
+
+                        {feedback.message && (
+                            <div className={`p-2 mb-4 rounded text-sm ${feedback.type === 'success' ? 'bg-green-100 text-green-700' : 'bg-red-100 text-red-700'}`}>
+                                {feedback.message}
+                            </div>
+                        )}
+
+                        <div className="grid grid-cols-2 gap-4">
+                            {/* Membros Atuais */}
+                            <div className="border p-3 rounded h-96 overflow-y-auto">
+                                <h4 className="font-semibold mb-2 border-b pb-1">Membros Atuais ({group.members.length})</h4>
+                                <ul className='space-y-2'>
+                                    {group.members.map(memberId => {
+                                        const memberUser = findUser(memberId, users);
+                                        const isOwner = memberId === group.ownerId;
+                                        return (
+                                            <li key={memberId} className="flex items-center justify-between text-sm p-1 rounded hover:bg-gray-50">
+                                                <div className='flex items-center gap-2'>
+                                                    <img src={memberUser?.photoURL || 'https://placehold.co/30x30'} className='w-6 h-6 rounded-full'/>
+                                                    <span>{memberUser?.username || 'Usuário Desconhecido'}</span>
+                                                    {isOwner && <i className="fas fa-crown text-yellow-500 text-xs ml-1" title="Dono do Grupo"></i>}
+                                                </div>
+                                                {currentUser.uid === group.ownerId && memberId !== currentUser.uid && (
+                                                    <button onClick={() => removeMember(memberId, memberUser?.username)} className='text-red-500 hover:text-red-700 text-xs'>
+                                                        <i className="fas fa-trash-alt"></i> Remover
+                                                    </button>
+                                                )}
+                                            </li>
+                                        );
+                                    })}
+                                </ul>
+                            </div>
+
+                            {/* Adicionar Membros */}
+                            <div className="border p-3 rounded">
+                                <h4 className="font-semibold mb-2 border-b pb-1">Adicionar Pessoas</h4>
+                                <input 
+                                    type="text" 
+                                    placeholder="Buscar usuário para adicionar..."
+                                    className="w-full border p-2 rounded mb-3"
+                                    value={search}
+                                    onChange={e => setSearch(e.target.value)}
+                                    disabled={currentUser.uid !== group.ownerId}
+                                />
+                                
+                                <ul className='space-y-2 h-72 overflow-y-auto'>
+                                    {search.length > 0 && filteredUsers.map(u => (
+                                        <li key={u.uid} className="flex items-center justify-between text-sm p-1 rounded hover:bg-green-50">
+                                            <div className='flex items-center gap-2'>
+                                                <img src={u.photoURL} className='w-6 h-6 rounded-full'/>
+                                                <span>{u.username}</span>
+                                            </div>
+                                            <button 
+                                                onClick={() => addMember(u)} 
+                                                className='bg-green-500 text-white text-xs px-2 py-1 rounded hover:bg-green-600'
+                                                disabled={currentUser.uid !== group.ownerId}
+                                            >
+                                                Adicionar
+                                            </button>
+                                        </li>
+                                    ))}
+                                    {search.length > 0 && filteredUsers.length === 0 && (
+                                        <p className='text-xs text-gray-400'>Nenhum usuário encontrado que não esteja no grupo.</p>
+                                    )}
+                                </ul>
+
+                                {currentUser.uid !== group.ownerId && <p className="text-xs text-red-500 mt-2">Apenas o dono pode adicionar.</p>}
+                            </div>
+                        </div>
+
+                        <button onClick={onClose} className="w-full mt-4 bg-gray-200 text-gray-700 py-2 rounded font-bold hover:bg-gray-300">
+                            Fechar
+                        </button>
+                    </div>
+                </div>
+            );
+        }
+
+        // --- Componente: Gerenciador de Grupos ---
+        function GroupsManager({ user, setActiveChat, onExit, users }) {
+            const [groups, setGroups] = useState([]);
+            const [groupName, setGroupName] = useState('');
+            const [loading, setLoading] = useState(true);
+            const [managingGroup, setManagingGroup] = useState(null); // Novo estado
+
+            // Fetch groups the user belongs to
+            useEffect(() => {
+                if (!user || user.isGuest) return;
+
+                // Consulta de grupos onde o UID do usuário está na lista de membros
+                const q = db.collection(COLLECTIONS.GROUPS).where('members', 'array-contains', user.uid);
+                
+                const unsub = q.onSnapshot(snap => {
+                    const groupList = snap.docs.map(doc => ({ id: doc.id, ...doc.data() }));
+                    setGroups(groupList);
+                    setLoading(false);
+                }, (error) => {
+                    console.error("Erro ao ouvir grupos:", error);
+                    setLoading(false);
+                });
+
+                return () => unsub();
+            }, [user?.uid]);
+
+            const createGroup = async () => {
+                if (!groupName.trim()) return;
+                if (user.isGuest) return console.log("Visitantes não podem criar grupos.");
+                
+                try {
+                    // Cria um novo documento de grupo com o criador como o primeiro membro
+                    const newGroupRef = await db.collection(COLLECTIONS.GROUPS).add({
+                        name: groupName,
+                        ownerId: user.uid,
+                        members: [user.uid],
+                        photoURL: `https://placehold.co/100x100/5555ff/ffffff?text=${groupName.substring(0,1).toUpperCase()}`,
+                        createdAt: firebase.firestore.FieldValue.serverTimestamp()
+                    });
+
+                    // Atualiza o perfil do usuário com o novo grupo
+                    await db.doc(`${COLLECTIONS.USERS}/${user.uid}`).update({
+                        groups: firebase.firestore.FieldValue.arrayUnion(newGroupRef.id)
+                    });
+                    
+                    setGroupName('');
+                    setActiveChat({ type: 'group', id: newGroupRef.id, name: groupName });
+                    onExit(); // Volta para a tela principal
+                } catch (e) {
+                    console.error("Erro ao criar grupo:", e);
+                }
+            };
+            
+            const leaveGroup = async (groupId, groupName) => {
+                if (!window.confirm(`Tem certeza que deseja sair do grupo ${groupName}?`)) return;
+                if (user.isGuest) return;
+
+                try {
+                    const batch = db.batch();
+                    
+                    // 1. Remover membro do grupo
+                    const groupRef = db.doc(`${COLLECTIONS.GROUPS}/${groupId}`);
+                    batch.update(groupRef, {
+                        members: firebase.firestore.FieldValue.arrayRemove(user.uid)
+                    });
+
+                    // 2. Remover o grupo do perfil do usuário
+                    const userRef = db.doc(`${COLLECTIONS.USERS}/${user.uid}`);
+                    batch.update(userRef, {
+                        groups: firebase.firestore.FieldValue.arrayRemove(groupId)
+                    });
+
+                    await batch.commit();
+                    alert(`Você saiu do grupo ${groupName}.`);
+                    
+                } catch (e) {
+                    console.error("Erro ao sair do grupo:", e);
+                }
+            };
+
+            if (managingGroup) {
+                return <ManageGroupModal group={managingGroup} currentUser={user} users={users} onClose={() => setManagingGroup(null)} />;
+            }
+
+
+            return (
+                <div className="p-4 max-w-lg mx-auto bg-white rounded shadow mt-4">
+                    <h2 className="text-2xl font-bold mb-4 flex justify-between items-center">
+                        <i className="fas fa-users mr-2 text-green-600"></i> Gerenciar Grupos
+                        <button onClick={onExit} className="text-sm text-gray-500 hover:text-gray-700">Voltar</button>
+                    </h2>
+                    
+                    <div className="border-b pb-4 mb-4">
+                        <h3 className="font-bold mb-2">Criar Novo Grupo</h3>
+                        <div className="flex gap-2">
+                            <input
+                                type="text"
+                                placeholder="Nome do Grupo"
+                                className="border p-2 rounded flex-1"
+                                value={groupName}
+                                onChange={e => setGroupName(e.target.value)}
+                                maxLength={30}
+                                disabled={user.isGuest}
+                            />
+                            <button onClick={createGroup} disabled={!groupName.trim() || user.isGuest} className="bg-green-600 text-white px-4 py-2 rounded">
+                                Criar
+                            </button>
+                        </div>
+                        {user.isGuest && <p className="text-xs text-red-500 mt-1">Visitantes não podem criar grupos.</p>}
+                    </div>
+
+                    <div>
+                        <h3 className="font-bold mb-2">Meus Grupos ({groups.length})</h3>
+                        {loading && <p className="text-sm text-gray-500">Carregando grupos...</p>}
+                        {groups.map(group => (
+                            <li 
+                                key={group.id} 
+                                className="flex items-center justify-between gap-3 p-3 hover:bg-gray-100 rounded border-b last:border-b-0"
+                            >
+                                <div className='flex items-center gap-3 cursor-pointer' onClick={() => { setActiveChat({ type: 'group', ...group }); onExit(); }}>
+                                    <img src={group.photoURL} className="w-10 h-10 rounded-full" />
+                                    <div className='flex-1'>
+                                        <span className="font-medium">{group.name}</span>
+                                        <p className="text-xs text-gray-500">{group.members.length} membros</p>
+                                    </div>
+                                </div>
+                                
+                                <div className='flex items-center gap-2'>
+                                    {group.ownerId === user.uid ? (
+                                        <button onClick={() => setManagingGroup(group)} className='text-xs bg-blue-500 text-white px-2 py-1 rounded hover:bg-blue-600'>
+                                            Gerenciar Membros
+                                        </button>
+                                    ) : (
+                                        <button onClick={() => leaveGroup(group.id, group.name)} className='text-xs bg-red-500 text-white px-2 py-1 rounded hover:bg-red-600'>
+                                            Sair
+                                        </button>
+                                    )}
+                                </div>
+                            </li>
+                        ))}
+                        {groups.length === 0 && !loading && <p className="text-sm text-gray-400">Você não faz parte de nenhum grupo.</p>}
+                    </div>
+                </div>
+            );
+        }
+
+        // --- Componente: View de Lembretes ---
+        function RemindersView({ user }) {
+            const [reminders, setReminders] = useState([]);
+            const [newReminder, setNewReminder] = useState('');
+            const remindersCollectionRef = db.collection(COLLECTIONS.REMINDERS(user.uid));
+
+            // Listener de Lembretes
+            useEffect(() => {
+                if (user.isGuest) return;
+                
+                const unsub = remindersCollectionRef
+                    .orderBy('createdAt', 'desc')
+                    .onSnapshot(snap => {
+                        setReminders(snap.docs.map(doc => ({ id: doc.id, ...doc.data() })));
+                    });
+
+                return () => unsub();
+            }, [user.uid]);
+
+            const addReminder = async () => {
+                if (!newReminder.trim() || user.isGuest) return;
+                
+                try {
+                    await remindersCollectionRef.add({
+                        text: newReminder,
+                        completed: false,
+                        createdAt: firebase.firestore.FieldValue.serverTimestamp()
+                    });
+                    setNewReminder('');
+                } catch(e) {
+                    console.error("Erro ao adicionar lembrete:", e);
+                }
+            };
+
+            const toggleReminder = async (id, currentStatus) => {
+                if (user.isGuest) return;
+                try {
+                    await remindersCollectionRef.doc(id).update({
+                        completed: !currentStatus
+                    });
+                } catch(e) {
+                    console.error("Erro ao atualizar lembrete:", e);
+                }
+            };
+
+            const deleteReminder = async (id) => {
+                if (user.isGuest) return;
+                try {
+                    await remindersCollectionRef.doc(id).delete();
+                } catch(e) {
+                    console.error("Erro ao deletar lembrete:", e);
+                }
+            };
+
+            if (user.isGuest) {
+                return (
+                    <div className="p-8 max-w-lg mx-auto bg-white rounded shadow mt-4 text-center text-gray-500">
+                        <i className="fas fa-lock text-3xl mb-2"></i>
+                        <p>A funcionalidade de Lembretes está indisponível para Visitantes.</p>
+                    </div>
+                );
+            }
+
+            return (
+                <div className="p-4 max-w-lg mx-auto bg-white rounded shadow mt-4">
+                    <h2 className="text-2xl font-bold mb-4 photogram-blue"><i className="fas fa-bell mr-2"></i> Meus Lembretes</h2>
+                    
+                    {/* Add Reminder */}
+                    <div className="flex gap-2 mb-6 border-b pb-4">
+                        <input
+                            type="text"
+                            placeholder="Adicionar novo lembrete..."
+                            className="border p-2 rounded flex-1"
+                            value={newReminder}
+                            onChange={e => setNewReminder(e.target.value)}
+                        />
+                        <button onClick={addReminder} disabled={!newReminder.trim()} className="bg-photogram-blue text-white px-4 py-2 rounded font-bold">
+                            Adicionar
+                        </button>
+                    </div>
+
+                    {/* Reminder List */}
+                    <div className="space-y-3">
+                        {reminders.length === 0 && <p className="text-gray-500 text-center">Nenhum lembrete encontrado.</p>}
+                        {reminders.map(r => (
+                            <div key={r.id} className={`flex items-center p-3 rounded shadow-sm transition ${r.completed ? 'bg-green-50' : 'bg-gray-50'}`}>
+                                <button onClick={() => toggleReminder(r.id, r.completed)} className="mr-3 text-xl">
+                                    <i className={`fas ${r.completed ? 'fa-check-square text-green-600' : 'fa-square text-gray-400'}`}></i>
+                                </button>
+                                <span className={`flex-1 ${r.completed ? 'line-through text-gray-500 italic' : 'font-medium'}`}>
+                                    {r.text}
+                                </span>
+                                <span className="text-xs text-gray-400 mr-3">{formatDateTime(r.createdAt)}</span>
+                                <button onClick={() => deleteReminder(r.id)} className="text-red-500 hover:text-red-700">
+                                    <i className="fas fa-trash-alt"></i>
+                                </button>
+                            </div>
+                        ))}
+                    </div>
+                </div>
+            );
+        }
+
+        // --- Componente: App Principal ---
+        function App() {
+            const [user, setUser] = useState(null);
+            const [isAuthReady, setIsAuthReady] = useState(false);
+            const [view, setView] = useState('feed'); // feed, classroom, reminders, group_manager, memories
+            const [seenPrivacy, setSeenPrivacy] = useState(false);
+            
+            // Dados Globais
+            const [posts, setPosts] = useState([]);
+            const [users, setUsers] = useState([]); 
+            
+            // Estados UI
+            const [searchQuery, setSearchQuery] = useState('');
+            const [isTranslateMode, setIsTranslateMode] = useState(false);
+            const [showProfileEdit, setShowProfileEdit] = useState(false);
+            const [activeChat, setActiveChat] = useState(null); 
+            const [profileToReport, setProfileToReport] = useState(null); // Denúncia / Ver Perfil
+
+            // Inicialização e Autenticação Firebase (Persistência)
+            useEffect(() => {
+                const hasSeenPrivacy = localStorage.getItem('photogram_seen_privacy');
+                if (hasSeenPrivacy) setSeenPrivacy(true);
+
+                const initializeAuth = async () => {
+                    try {
+                        // 1. Iniciar sessão com o token do ambiente
+                        if (initialAuthToken) {
+                            await auth.signInWithCustomToken(initialAuthToken);
+                        } else {
+                            await auth.signInAnonymously();
+                        }
+                    } catch (error) {
+                        console.error("Firebase Auth: Falha ao iniciar autenticação.", error);
+                    }
+
+                    // 2. Ouve o estado de autenticação (Este é o padrão de persistência)
+                    const unsubscribe = auth.onAuthStateChanged(async (authUser) => {
+                        if (authUser) {
+                            // Se o Auth está ativo, tentamos buscar o perfil no Firestore
+                            const userRef = db.doc(`${COLLECTIONS.USERS}/${authUser.uid}`);
+                            const doc = await userRef.get();
+
+                            if (doc.exists) {
+                                // Perfil encontrado! Login automático.
+                                setUser(doc.data());
+                            } else {
+                                setUser(null); 
+                            }
+                        } else {
+                            // Usuário deslogado
+                            setUser(null);
+                        }
+                        setIsAuthReady(true); // Indica que a checagem inicial terminou
+                    });
+
+                    return () => unsubscribe();
+                };
+
+                initializeAuth();
+            }, []);
+
+            // Salvar privacidade
+            const closePrivacy = () => {
+                setSeenPrivacy(true);
+                localStorage.setItem('photogram_seen_privacy', 'true');
+            };
+
+            // Listeners de Dados (Só se o usuário estiver logado e NÃO for convidado)
+            useEffect(() => {
+                if (!user || user.isGuest) {
+                    setUsers([]); // Limpa a lista de usuários para visitantes
+                    return;
+                }
+
+                const userUid = user.uid;
+
+                // Listen Posts
+                const unsubPosts = db.collection(COLLECTIONS.POSTS).orderBy('timestamp', 'desc').limit(50)
+                    .onSnapshot(snap => setPosts(snap.docs.map(d => ({id: d.id, ...d.data()}))));
+
+                // Listen Users
+                const unsubUsers = db.collection(COLLECTIONS.USERS).limit(100)
+                    .onSnapshot(snap => setUsers(snap.docs.map(d => d.data())));
+
+                // Listen My User Data (para atualizar amigos/requests/grupos em tempo real)
+                const unsubMe = db.doc(`${COLLECTIONS.USERS}/${userUid}`).onSnapshot(doc => {
+                    if (doc.exists) setUser(doc.data());
+                });
+
+                return () => { 
+                    unsubPosts(); 
+                    unsubUsers(); 
+                    unsubMe(); 
+                };
+            }, [user?.uid, isAuthReady]);
+
+            // --- Ações ---
+
+            const sendFriendRequest = async (targetUid) => {
+                if (user.isGuest) return console.log("Visitantes não podem adicionar amigos.");
+                const targetRef = db.doc(`${COLLECTIONS.USERS}/${targetUid}`);
+                try {
+                    await targetRef.update({
+                        friendRequests: firebase.firestore.FieldValue.arrayUnion(user.uid)
+                    });
+                } catch(e) {
+                    console.error("Erro ao enviar solicitação:", e);
+                }
+            };
+
+            const acceptFriend = async (requesterUid) => {
+                if (user.isGuest) return console.log("Visitantes não podem aceitar amigos.");
+                const batch = db.batch();
+                const meRef = db.doc(`${COLLECTIONS.USERS}/${user.uid}`);
+                const themRef = db.doc(`${COLLECTIONS.USERS}/${requesterUid}`);
+
+                batch.update(meRef, {
+                    friends: firebase.firestore.FieldValue.arrayUnion(requesterUid),
+                    friendRequests: firebase.firestore.FieldValue.arrayRemove(requesterUid)
+                });
+                batch.update(themRef, {
+                    friends: firebase.firestore.FieldValue.arrayUnion(user.uid)
+                });
+
+                try {
+                    await batch.commit();
+                } catch(e) {
+                    console.error("Erro ao aceitar solicitação:", e);
+                }
+            };
+
+            const createPost = async (text, hasImage) => {
+                if (text.length > 150) return console.log("Limite de 150 caracteres excedido.");
+                if (containsLink(text)) return console.log("Links não são permitidos.");
+
+                await db.collection(COLLECTIONS.POSTS).add({
+                    text,
+                    authorId: user.uid,
+                    authorName: user.displayName,
+                    authorPhoto: user.photoURL,
+                    image: hasImage ? `https://picsum.photos/seed/${Date.now()}/600/400` : null,
+                    timestamp: firebase.firestore.FieldValue.serverTimestamp(),
+                    likesBy: [] // Array para rastrear quem curtiu
+                });
+            };
+
+            const toggleLike = async (postId, currentlyLiked) => {
+                if (user.isGuest) return console.log("Visitantes não podem curtir posts.");
+                
+                const postRef = db.doc(`${COLLECTIONS.POSTS}/${postId}`);
+                
+                try {
+                    if (currentlyLiked) {
+                        // Descurtir: remover o UID do array
+                        await postRef.update({
+                            likesBy: firebase.firestore.FieldValue.arrayRemove(user.uid)
+                        });
+                        console.log("Post descurtido.");
+                    } else {
+                        // Curtir: adicionar o UID ao array
+                        await postRef.update({
+                            likesBy: firebase.firestore.FieldValue.arrayUnion(user.uid)
+                        });
+                        console.log("Post curtido!");
+                    }
+                } catch(e) {
+                    console.error("Erro ao curtir/descurtir post:", e);
+                }
+            };
+
+
+            const updateProfile = async (newBio) => {
+                if(user.isGuest) return;
+                try {
+                    await db.doc(`${COLLECTIONS.USERS}/${user.uid}`).update({ bio: newBio });
+                    setShowProfileEdit(false);
+                } catch(e) {
+                    console.error("Erro ao salvar perfil:", e);
+                }
+            };
+
+            const handleLogout = async () => {
+                try {
+                    await auth.signOut(); // Desloga do Firebase Auth
+                    setUser(null); // Limpa o estado local
+                    setIsAuthReady(false); // Reseta para exibir o loading
+                } catch (e) {
+                    console.error("Erro ao deslogar:", e);
+                }
+            };
+
+            // Filtragem de Busca
+            const filteredUsers = users.filter(u => 
+                u.username.toLowerCase().includes(searchQuery.toLowerCase()) && u.uid !== user.uid
+            );
+
+            // Filtragem de Memórias (Posts antigos aleatórios simulados)
+            const memoryPosts = posts.slice(posts.length - 3); 
+
+            if (!isAuthReady) {
+                return (
+                    <div className="min-h-screen flex items-center justify-center text-xl text-gray-600">
+                        <i className="fas fa-spinner fa-spin mr-2"></i> Carregando Autenticação...
+                    </div>
+                );
+            }
+
+            if (!user) return <LoginScreen onLogin={setUser} />;
+            
+            // Função para abrir perfil de um usuário e permitir denúncia
+            const viewUserProfile = (targetUid) => {
+                if (user.isGuest) return console.log("Visitantes não podem interagir com perfis.");
+                const targetUser = users.find(u => u.uid === targetUid);
+                if (targetUser && targetUser.uid !== user.uid) {
+                    setProfileToReport(targetUser);
+                } else if (targetUser && targetUser.uid === user.uid) {
+                    setShowProfileEdit(true);
+                }
+            };
+
+            const openGroupManager = () => setView('group_manager');
+
+            return (
+                <div className="min-h-screen bg-[#f0f2f5]">
+                    {!seenPrivacy && <PrivacyWarning onClose={closePrivacy} />}
+                    
+                    {/* Header */}
+                    <nav className="glass-header fixed top-0 w-full z-40 px-4 h-14 flex items-center justify-between shadow-sm">
+                        <div className="flex items-center gap-2">
+                            <i className="fas fa-camera text-3xl photogram-blue"></i> {/* LOGO CAMERA */}
+                            <div className="ml-4 bg-gray-100 rounded-full px-3 py-2 hidden md:flex items-center w-64">
+                                <i className="fas fa-search text-gray-500 mr-2"></i>
+                                <input 
+                                    type="text" 
+                                    placeholder={isTranslateMode ? "Search accounts..." : "Pesquisar contas..."}
+                                    className="bg-transparent border-none focus:outline-none text-sm w-full"
+                                    value={searchQuery}
+                                    onChange={e => setSearchQuery(e.target.value)}
+                                />
+                            </div>
+                        </div>
+
+                        <div className="flex gap-6 h-full text-2xl text-gray-500">
+                            <button onClick={() => setView('feed')} className={`h-full border-b-4 px-4 ${view === 'feed' ? 'border-blue-600 text-blue-600' : 'border-transparent'}`}><i className="fas fa-home"></i></button>
+                            <button onClick={() => setView('memories')} className={`h-full border-b-4 px-4 ${view === 'memories' ? 'border-blue-600 text-blue-600' : 'border-transparent'}`}><i className="fas fa-history"></i></button>
+                            <button onClick={() => setView('reminders')} className={`h-full border-b-4 px-4 ${view === 'reminders' ? 'border-blue-600 text-blue-600' : 'border-transparent'}`}><i className="fas fa-bell"></i></button>
+                            <button onClick={() => setView('classroom')} className={`h-full border-b-4 px-4 ${view === 'classroom' ? 'border-blue-600 text-blue-600' : 'border-transparent'}`}><i className="fas fa-chalkboard-teacher"></i></button>
+                        </div>
+
+                        <div className="flex items-center gap-2">
+                            <button onClick={() => setIsTranslateMode(!isTranslateMode)} className="text-sm bg-gray-200 px-2 py-1 rounded hover:bg-gray-300">
+                                <i className="fas fa-language"></i> {isTranslateMode ? 'EN' : 'PT'}
+                            </button>
+                            <div className="flex items-center gap-2 font-semibold bg-gray-200 rounded-full pr-3 pl-1 py-1 cursor-pointer" onClick={() => setShowProfileEdit(true)}>
+                                <img src={user.photoURL} className="w-7 h-7 rounded-full bg-white" />
+                                <span className="text-sm hidden md:inline">{user.username}</span>
+                            </div>
+                            <button onClick={handleLogout} className="w-8 h-8 rounded-full bg-gray-300 hover:bg-gray-400 flex items-center justify-center">
+                                <i className="fas fa-sign-out-alt text-sm"></i>
+                            </button>
+                        </div>
+                    </nav>
+
+                    {/* Main Content */}
+                    <div className="pt-20 pb-8 px-2 max-w-6xl mx-auto flex gap-4 justify-center">
+                        
+                        {/* Left Sidebar (Friends & Groups) */}
+                        <div className="hidden lg:block w-72 h-[calc(100vh-100px)] overflow-y-auto sticky top-20">
+                            
+                            {/* Requests */}
+                            {user.friendRequests?.length > 0 && (
+                                <div className="bg-white rounded-lg shadow p-3 mb-4">
+                                    <h3 className="font-bold mb-2 text-sm">Solicitações Recebidas</h3>
+                                    {user.friendRequests.map(reqId => {
+                                        const reqUser = users.find(u => u.uid === reqId);
+                                        if(!reqUser) return null;
+                                        return (
+                                            <div key={reqId} className="flex items-center justify-between mb-2">
+                                                <div className="flex items-center gap-2">
+                                                    <img src={reqUser.photoURL} className="w-6 h-6 rounded-full" />
+                                                    <span className="text-sm truncate w-20">{reqUser.username}</span>
+                                                </div>
+                                                <button onClick={() => acceptFriend(reqId)} className="bg-blue-500 text-white text-xs px-2 py-1 rounded">Aceitar</button>
+                                            </div>
+                                        )
+                                    })}
+                                </div>
+                            )}
+
+                            {/* Chat List */}
+                            <div className="bg-white rounded-lg shadow p-3">
+                                <h3 className="font-bold text-gray-500 mb-2">Chats & Contatos</h3>
+                                
+                                <ul className="space-y-1 mt-2">
+                                    <p className="text-xs font-bold text-gray-500 mt-4 border-b pb-1 flex justify-between">
+                                        Chats Privados ({user.friends?.length || 0})
+                                    </p>
+                                    {user.friends?.map(fid => {
+                                        const fUser = users.find(u => u.uid === fid);
+                                        if(!fUser) return null;
+                                        return (
+                                            <li key={fid} onClick={() => setActiveChat({type: 'private', ...fUser})} className="flex items-center gap-2 p-2 hover:bg-gray-100 rounded cursor-pointer">
+                                                <div className="relative">
+                                                    <img src={fUser.photoURL} className="w-8 h-8 rounded-full" />
+                                                    <div className="absolute bottom-0 right-0 w-2 h-2 bg-green-500 rounded-full border border-white"></div>
+                                                </div>
+                                                <span className="text-sm font-medium">{fUser.username}</span>
+                                            </li>
+                                        )
+                                    })}
+                                    {(!user.friends || user.friends.length === 0) && <p className="text-xs text-gray-400">Sem amigos.</p>}
+
+                                    <p className="text-xs font-bold text-gray-500 mt-4 border-b pb-1 flex justify-between">
+                                        Grupos ({user.groups?.length || 0})
+                                        <button onClick={openGroupManager} className='text-blue-500 hover:text-blue-700'>
+                                            <i className="fas fa-plus-circle"></i>
+                                        </button>
+                                    </p>
+                                    {user.groups?.map(groupId => {
+                                        const group = groups.find(g => g.id === groupId);
+                                        if(!group) return null;
+                                        return (
+                                            <li key={groupId} onClick={() => setActiveChat({type: 'group', ...group})} className="flex items-center gap-2 p-2 hover:bg-gray-100 rounded cursor-pointer">
+                                                <div className="relative">
+                                                    <img src={group.photoURL} className="w-8 h-8 rounded-full" />
+                                                </div>
+                                                <span className="text-sm font-medium">{group.name}</span>
+                                            </li>
+                                        )
+                                    })}
+                                    {(!user.groups || user.groups.length === 0) && <p className="text-xs text-gray-400">Nenhum grupo.</p>}
+                                </ul>
+                            </div>
+                        </div>
+
+                        {/* Center Feed / Views */}
+                        <div className="flex-1 max-w-xl">
+                            {view === 'classroom' && <Classroom user={user} onExit={() => setView('feed')} />}
+                            {view === 'reminders' && <RemindersView user={user} />}
+                            {view === 'group_manager' && <GroupsManager user={user} setActiveChat={setActiveChat} onExit={() => setView('feed')} users={users} />}
+                            
+                            {view === 'memories' && (
+                                <div className="bg-white rounded-lg shadow p-6 text-center">
+                                    <h2 className="text-2xl font-bold mb-4 photogram-blue"><i className="fas fa-clock"></i> Lembranças (Simulado)</h2>
+                                    <p className="mb-4 text-gray-600">Este é o seu cantinho nostálgico! (Simulado com posts recentes)</p>
+                                    <div className="space-y-4 text-left">
+                                        {memoryPosts.map((p, index) => {
+                                            return (
+                                                <div key={p.id} className="border p-4 rounded bg-gray-50 opacity-75">
+                                                    <p className="text-xs text-gray-500 mb-1">Memória Antiga (simulado)</p>
+                                                    <p>{isTranslateMode ? translateText(p.text) : p.text}</p>
+                                                </div>
+                                            );
+                                        })}
+                                    </div>
+                                </div>
+                            )}
+
+                            {view === 'feed' && (
+                                <>
+                                    {/* Create Post */}
+                                    {!user.isGuest && <CreatePostBox user={user} onSubmit={createPost} isTranslateMode={isTranslateMode} />}
+
+                                    {/* Search Results (if searching) */}
+                                    {searchQuery && (
+                                        <div className="bg-white rounded-lg shadow p-4 mb-4">
+                                            <h3 className="font-bold mb-2">Resultados da Busca (Apenas Contas)</h3>
+                                            {filteredUsers.map(u => {
+                                                const isAlreadyFriend = user.friends?.includes(u.uid);
+                                                
+                                                return (
+                                                    // Tornar a linha clicável para abrir o modal de perfil/denúncia
+                                                    <div key={u.uid} className="flex justify-between items-center border-b py-2 cursor-pointer hover:bg-gray-50" onClick={() => viewUserProfile(u.uid)}>
+                                                        <div className="flex items-center gap-2">
+                                                            <img src={u.photoURL} className="w-8 h-8 rounded-full" />
+                                                            <span>{u.username}</span>
+                                                        </div>
+                                                        <div className='flex items-center gap-4'>
+                                                            {/* Status simplificado no resultado da busca */}
+                                                            <span className={`text-sm font-semibold ${isAlreadyFriend ? 'text-green-600' : 'text-gray-500'}`}>
+                                                                {isAlreadyFriend ? 'Amigo' : 'Não Amigo'}
+                                                            </span>
+                                                            <span className='text-red-500 text-sm font-semibold'>
+                                                                <i className="fas fa-flag"></i> Denunciar
+                                                            </span>
+                                                        </div>
+                                                    </div>
+                                                );
+                                            })}
+                                            {filteredUsers.length === 0 && <p className="text-sm text-gray-400">Nenhum usuário encontrado.</p>}
+                                        </div>
+                                    )}
+
+                                    {/* Posts Feed */}
+                                    <div className="space-y-4">
+                                        {posts.map(post => (
+                                            <PostItem 
+                                                key={post.id} 
+                                                post={post} 
+                                                currentUser={user} 
+                                                isTranslateMode={isTranslateMode}
+                                                onShare={async () => {
+                                                    await createPost(`[Compartilhado] ${post.text}`, !!post.image);
+                                                }}
+                                                onLikeToggle={toggleLike} 
+                                            />
+                                        ))}
+                                    </div>
+                                </>
+                            )}
+                        </div>
+                    </div>
+
+                    {/* Chat Window (Flutuante - Privado ou Grupo) */}
+                    {activeChat && (
+                        <ChatBox 
+                            chat={activeChat} 
+                            currentUser={user} 
+                            onClose={() => setActiveChat(null)} 
+                            isTranslateMode={isTranslateMode}
+                            users={users}
+                        />
+                    )}
+
+                    {/* Self Profile Edit Modal */}
+                    {showProfileEdit && (
+                        <div className="modal-overlay" onClick={() => setShowProfileEdit(false)}>
+                            <div className="bg-white p-6 rounded-lg w-80" onClick={e => e.stopPropagation()}>
+                                <h3 className="font-bold mb-4">Editar Perfil</h3>
+                                <p className="text-sm text-gray-500 mb-2">UID: {user.uid}</p>
+                                <p className="text-sm text-gray-500 mb-2">@{user.username}</p>
+                                <textarea 
+                                    className="w-full border p-2 rounded mb-4"
+                                    defaultValue={user.bio}
+                                    id="newBioInput"
+                                    maxLength={150}
+                                />
+                                <button 
+                                    onClick={() => updateProfile(document.getElementById('newBioInput').value)}
+                                    className="w-full bg-photogram-blue text-white py-2 rounded"
+                                >Salvar</button>
+                            </div>
+                        </div>
+                    )}
+
+                    {/* Other User Profile/Report Modal */}
+                    {/* Este modal agora é acionado ao clicar em um usuário na busca OU na função viewUserProfile */}
+                    {profileToReport && (
+                        <div className="modal-overlay" onClick={() => setProfileToReport(null)}>
+                            <div className="bg-white p-6 rounded-lg w-80 text-center" onClick={e => e.stopPropagation()}>
+                                <img src={profileToReport.photoURL} className="w-16 h-16 rounded-full mx-auto mb-3" />
+                                <h3 className="font-bold text-xl mb-1">@{profileToReport.username}</h3>
+                                <p className="text-sm text-gray-500 mb-4 italic">{profileToReport.bio || 'Sem biografia.'}</p>
+                                
+                                {/* Ações de Amizade */}
+                                {user.friends?.includes(profileToReport.uid) ? (
+                                    <span className='inline-block text-sm font-bold text-green-600 mb-2'>Amigo</span>
+                                ) : (
+                                    <button 
+                                        onClick={() => sendFriendRequest(profileToReport.uid)}
+                                        className='inline-block text-sm font-bold bg-blue-500 text-white px-3 py-1 rounded mb-2 hover:bg-blue-600'
+                                    >
+                                        Adicionar Amigo
+                                    </button>
+                                )}
+                                
+                                <button 
+                                    // Ao clicar em denunciar, chamamos o modal de denúncia (ReportUserModal)
+                                    onClick={() => { 
+                                        // O setProfileToReport(profileToReport) é usado para reabrir o modal principal com a interface de Denúncia
+                                        // A lógica de denúncia já está no componente ReportUserModal
+                                    }}
+                                    className="w-full bg-red-500 text-white py-2 rounded font-bold hover:bg-red-600 mt-4"
+                                >
+                                    <i className="fas fa-flag mr-2"></i> Denunciar Usuário
+                                </button>
+                                <button onClick={() => setProfileToReport(null)} className="w-full mt-2 text-sm text-gray-500 hover:text-gray-700">Fechar</button>
+
+                                {/* Usa o mesmo componente de Denúncia. Mantenho o profileToReport no state para que o ReportUserModal possa ser exibido */}
+                                <ReportUserModal 
+                                    targetUser={profileToReport} 
+                                    currentUser={user} 
+                                    onClose={() => setProfileToReport(null)} 
+                                />
+                            </div>
+                        </div>
+                    )}
+                </div>
+            );
+        }
+
+        // --- Componente: Caixa de Criar Post ---
+        function CreatePostBox({ user, onSubmit, isTranslateMode }) {
+            const [text, setText] = useState('');
+            const [hasImage, setHasImage] = useState(false);
+
+            const handleSubmit = () => {
+                if(!text.trim() && !hasImage) return;
+                onSubmit(text, hasImage);
+                setText('');
+                setHasImage(false);
+            };
+
+            return (
+                <div className="bg-white rounded-lg shadow p-4 mb-4">
+                    <div className="flex gap-2 mb-2">
+                        <img src={user.photoURL} className="w-10 h-10 rounded-full" />
+                        <input 
+                            className="bg-gray-100 rounded-full px-4 flex-1 focus:outline-none"
+                            placeholder={isTranslateMode ? "What's on your mind? (Max 150 chars)" : `No que você está pensando, ${user.username}? (Máx 150 chars)`}
+                            value={text}
+                            onChange={e => setText(e.target.value)}
+                            maxLength={150}
+                        />
+                    </div>
+                    <div className="text-right text-xs text-gray-400 mb-2">{text.length}/150}</div>
+                    {hasImage && <div className="text-xs text-green-600 mb-2"><i className="fas fa-check"></i> Imagem adicionada</div>}
+                    <div className="border-t pt-2 flex justify-between">
+                        <button onClick={() => setHasImage(!hasImage)} className="text-gray-500 hover:bg-gray-100 px-4 py-1 rounded">
+                            <i className="fas fa-image text-green-500"></i> Foto
+                        </button>
+                        <button onClick={handleSubmit} className="bg-photogram-blue text-white px-6 py-1 rounded font-bold">Postar</button>
+                    </div>
+                </div>
+            );
+        }
+
+        // --- Componente: Item de Post ---
+        function PostItem({ post, currentUser, onShare, isTranslateMode, onLikeToggle }) {
+            const [sharing, setSharing] = useState(false);
+            const [countdown, setCountdown] = useState(0);
+
+            // Verifica se o usuário atual curtiu o post
+            const isLiked = post.likesBy?.includes(currentUser.uid) || false;
+            const likeCount = post.likesBy?.length || 0;
+
+            const handleShareClick = () => {
+                if (currentUser.isGuest) return console.log("Visitantes não podem compartilhar posts.");
+                if (sharing) return;
+                setSharing(true);
+                setCountdown(5);
+                
+                const timer = setInterval(() => {
+                    setCountdown(prev => {
+                        if (prev <= 1) {
+                            clearInterval(timer);
+                            onShare().then(() => setSharing(false));
+                            return 0;
+                        }
+                        return prev - 1;
+                    });
+                }, 1000);
+            };
+
+            return (
+                <div className="bg-white rounded-lg shadow fade-in">
+                    <div className="p-4 flex items-center gap-2">
+                        <img src={post.authorPhoto} className="w-10 h-10 rounded-full border" />
+                        <div>
+                            <h4 className="font-bold text-sm">{post.authorName}</h4>
+                            <p className="text-xs text-gray-500">{formatTime(post.timestamp)}</p>
+                        </div>
+                    </div>
+                    <div className="px-4 pb-2">
+                        <p>{isTranslateMode ? translateText(post.text) : post.text}</p>
+                    </div>
+                    {post.image && <img src={post.image} className="w-full h-auto object-cover" />}
+                    <div className="flex border-t p-1 mt-2">
+                        <button 
+                            onClick={() => onLikeToggle(post.id, isLiked)} // CHAMADA PARA CURTIR
+                            disabled={currentUser.isGuest}
+                            className={`flex-1 py-2 font-semibold text-sm transition ${isLiked ? 'text-red-600 bg-red-50' : 'text-gray-600 hover:bg-gray-100'}`}
+                        >
+                            <i className={`${isLiked ? 'fas' : 'far'} fa-heart`}></i> {likeCount} {isTranslateMode ? 'Likes' : 'Curtidas'}
+                        </button>
+
+                        <button 
+                            onClick={handleShareClick}
+                            disabled={sharing || currentUser.isGuest}
+                            className={`flex-1 py-2 font-semibold text-sm transition ${sharing ? 'text-blue-500 bg-blue-50' : 'text-gray-600 hover:bg-gray-100'}`}
+                        >
+                            <i className="fas fa-share"></i> {sharing ? `Enviando em ${countdown}...` : 'Compartilhar'}
+                        </button>
+                    </div>
+                </div>
+            );
+        }
+
+        // --- Componente: Chat Box (Flutuante - Privado/Grupo) ---
+        function ChatBox({ chat, currentUser, onClose, isTranslateMode, users }) {
+            const [msgs, setMsgs] = useState([]);
+            const [input, setInput] = useState('');
+            const endRef = useRef(null);
+
+            const isGroup = chat.type === 'group';
+            const chatName = isGroup ? chat.name : chat.username;
+            const chatPhoto = isGroup ? chat.photoURL : chat.photoURL;
+
+            useEffect(() => {
+                if (currentUser.isGuest) {
+                    setMsgs([]);
+                    return;
+                }
+
+                let q;
+                if (isGroup) {
+                    // Mensagens de grupo: subcoleção dentro do documento do grupo
+                    q = db.collection(COLLECTIONS.GROUPS).doc(chat.id).collection('messages').orderBy('timestamp', 'asc');
+                } else {
+                    // Mensagens privadas: coleção global, filtrada por remetente/destinatário
+                    q = db.collection(COLLECTIONS.MESSAGES).orderBy('timestamp', 'asc');
+                }
+
+                const unsub = q.onSnapshot(snap => {
+                    let relevant = snap.docs.map(d => d.data());
+                    
+                    if (!isGroup) {
+                        // Filtrar mensagens privadas pertencentes a esta conversa (entre A e B)
+                        relevant = relevant.filter(m => 
+                            (m.senderId === currentUser.uid && m.receiverId === chat.uid) ||
+                            (m.senderId === chat.uid && m.receiverId === currentUser.uid)
+                        );
+                    }
+                    
+                    setMsgs(relevant);
+                    setTimeout(() => endRef.current?.scrollIntoView({ behavior: 'smooth' }), 100);
+                });
+                return () => unsub();
+            }, [chat.id, chat.uid, isGroup]);
+
+            const send = async (e) => {
+                e.preventDefault();
+                if(!input.trim()) return;
+                if(containsLink(input)) return console.log("Links proibidos.");
+                if(currentUser.isGuest) return console.log("Visitantes não podem enviar mensagens.");
+
+                try {
+                    if (isGroup) {
+                        // Enviar para subcoleção de mensagens do grupo
+                        await db.collection(COLLECTIONS.GROUPS).doc(chat.id).collection('messages').add({
+                            text: input,
+                            senderId: currentUser.uid,
+                            senderName: currentUser.username,
+                            timestamp: firebase.firestore.FieldValue.serverTimestamp()
+                        });
+                    } else {
+                        // Enviar para coleção de mensagens privadas
+                        await db.collection(COLLECTIONS.MESSAGES).add({
+                            text: input,
+                            senderId: currentUser.uid,
+                            receiverId: chat.uid,
+                            timestamp: firebase.firestore.FieldValue.serverTimestamp()
+                        });
+                    }
+                } catch(e) {
+                    console.error("Erro ao enviar mensagem:", e);
+                }
+                setInput('');
+            };
+            
+            // Função para obter o nome do remetente (apenas para grupos)
+            const getSenderName = (senderId) => {
+                if (senderId === currentUser.uid) return "Eu";
+                const sender = users.find(u => u.uid === senderId);
+                return sender?.username || 'Desconhecido';
+            };
+
+            return (
+                <div className="fixed bottom-0 right-4 w-80 bg-white shadow-2xl rounded-t-lg border flex flex-col z-50 h-96">
+                    <div className="bg-photogram-blue text-white p-2 rounded-t-lg flex justify-between items-center cursor-pointer">
+                        <span className="font-bold text-sm" onClick={onClose}>Chat: {chatName}</span>
+                        <span onClick={onClose}><i className="fas fa-times"></i></span>
+                    </div>
+                    <div className="flex-1 overflow-y-auto p-2 bg-gray-50 space-y-2">
+                        {msgs.map((m, i) => {
+                            const isMine = m.senderId === currentUser.uid;
+                            return (
+                                <div key={i} className={`flex ${isMine ? 'justify-end' : 'justify-start'}`}>
+                                    <div className={`p-2 rounded-lg text-sm max-w-[80%] ${isMine ? 'bg-blue-500 text-white' : 'bg-gray-200'}`}>
+                                        {isGroup && !isMine && <span className="text-xs font-bold block mb-1 text-gray-700">{getSenderName(m.senderId)}</span>}
+                                        {isTranslateMode && !isMine ? translateText(m.text) : m.text}
+                                    </div>
+                                </div>
+                            );
+                        })}
+                        <div ref={endRef} />
+                    </div>
+                    <form onSubmit={send} className="p-2 border-t flex">
+                        <input 
+                            className="flex-1 text-sm outline-none" 
+                            value={input} onChange={e => setInput(e.target.value)} 
+                            placeholder="Mensagem..." 
+                            disabled={currentUser.isGuest}
+                        />
+                        <button className="text-blue-500" disabled={currentUser.isGuest}><i className="fas fa-paper-plane"></i></button>
+                    </form>
+                </div>
+            );
+        }
+
+
+        const root = ReactDOM.createRoot(document.getElementById('root'));
+        root.render(<App />);
+    </script>
+</body>
+</html>
